@@ -1,8 +1,8 @@
 import express from "express";
-import { createBasicTokenBucket } from "./rate-limiter.ts";
+import { createRedisTokenBucket } from "./rate-limiter.ts";
 
 const app = express();
-const limiter = createBasicTokenBucket(10, 1); // 10 requests at capacity, refill rate = 1/sec
+const limiter = createRedisTokenBucket(10, 1); // 10 requests at capacity, refill rate = 1/sec
 
 app.use((req, res, next) => {
   const userId = req.ip;
