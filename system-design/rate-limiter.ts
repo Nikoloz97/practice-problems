@@ -1,4 +1,7 @@
+import { NextFunction, Request, Response } from "express";
 import Redis from "ioredis";
+import { logError } from "./logger";
+import { asyncHandler } from "./middleware-helper";
 
 type Bucket = {
   tokens: number;
@@ -10,12 +13,12 @@ export function createBasicTokenBucket(capacity: number, refillRate: number) {
   const buckets = new Map<string, Bucket>();
 
   const refill = (bucket: Bucket) => {
-    const currentTime = Date.now();
-    const elapsedSeconds = (currentTime - bucket.lastRefillTimeMilli) / 1000; // divide by 1000 to convert ms -> s
+    const timeNowMilli = Date.now();
+    const elapsedSeconds = (timeNowMilli - bucket.lastRefillTimeMilli) / 1000; // divide by 1000 to convert ms -> s
     const newTokens = Math.floor(elapsedSeconds * refillRate);
     if (newTokens > 0) {
       bucket.tokens = Math.min(capacity, bucket.tokens + newTokens);
-      bucket.lastRefillTimeMilli = currentTime;
+      bucket.lastRefillTimeMilli = timeNowMilli;
     }
   };
 
@@ -78,4 +81,58 @@ export function createRedisTokenBucket(
     }
   }
   return { isRequestAllowed };
+}
+
+export function createBasicSlidingWindowLimiter(
+  timeWindowMilli: number,
+  maxRequests: number
+) {
+  const timestampRequestsLog = new Map<string, number[]>();
+
+  return asyncHandler(
+    async (request: Request, response: Response, next: NextFunction) => {
+      const timeNowMilli = Date.now();
+      const userIp = request.ip;
+
+      if (!userIp) {
+        await logError("Missing IP address", {
+          url: request.url,
+          headers: request.headers,
+        });
+        return response
+          .status(400)
+          .json({ message: "Invalid request: missing IP" });
+      }
+
+      if (!timestampRequestsLog.get(userIp)) {
+        timestampRequestsLog.set(userIp, []);
+      }
+
+      const userTimestampsWithinWindow: number[] = timestampRequestsLog
+        .get(userIp)!
+        .filter(
+          (userTimestamp) => userTimestamp - timeNowMilli < timeWindowMilli
+        );
+
+      if (userTimestampsWithinWindow.length >= maxRequests) {
+        const retryAfter =
+          Math.ceil(
+            timeWindowMilli -
+              (timeNowMilli - timestampRequestsLog.get(userIp)![0])
+          ) / 1000;
+
+        response.setHeader("Retry-after", retryAfter.toString());
+
+        return response
+          .status(429)
+          .json({
+            message: `Rate limit exceeded. Try again in ${retryAfter}s.`,
+          });
+      }
+
+      timestampRequestsLog.get(userIp)!.push(timeNowMilli);
+
+      next();
+    }
+  );
 }
